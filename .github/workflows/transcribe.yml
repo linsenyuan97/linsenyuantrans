@@ -1,0 +1,42 @@
+name: Transcribe Meeting Audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      taskId:
+        description: "任務 ID"
+        required: true
+      driveFileId:
+        description: "Google Drive 音訊檔案 ID"
+        required: true
+      fileName:
+        description: "原始檔名"
+        required: false
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --break-system-packages -r github/scripts/requirements.txt
+
+      - name: Run transcription
+        env:
+          TASK_ID: ${{ github.event.inputs.taskId }}
+          DRIVE_FILE_ID: ${{ github.event.inputs.driveFileId }}
+          FILE_NAME: ${{ github.event.inputs.fileName }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TRANSCRIPT_FOLDER_ID: ${{ secrets.TRANSCRIPT_FOLDER_ID }}
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+        run: python github/scripts/transcribe.py
