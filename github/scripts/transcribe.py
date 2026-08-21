@@ -1,12 +1,20 @@
 """
-林森苑會議辨識字幕 — GitHub Actions 辨識腳本 (Large-v3 高精準度版)
+林森苑會議辨識字幕 — GitHub Actions 辨識腳本
 
 流程：
   1. 用 Service Account 從 Google Drive 下載音訊檔
-  2. 用 OpenAI large-v3 模型做高精準度語音辨識（繁體中文）
-  3. 使用 OpenCC 自動轉為臺灣正體中文
+  2. 用 faster-whisper 做語音辨識（中文）
+  3. 把逐字稿（含時間戳記）存成 txt，上傳回 Google Drive
   4. 刪除原始音訊檔（隱私考量）
-  5. 呼叫 Apps Script Web App 回報完成狀態與字幕內容
+  5. 呼叫 Apps Script Web App 回報完成狀態
+
+需要的環境變數（由 GitHub Actions workflow 傳入）：
+  TASK_ID                      任務 ID
+  DRIVE_FILE_ID                音訊檔在 Drive 上的檔案 ID
+  FILE_NAME                    原始檔名（可選，用於逐字稿命名）
+  GOOGLE_SERVICE_ACCOUNT_JSON  Service Account 金鑰 JSON 內容（整段字串）
+  TRANSCRIPT_FOLDER_ID         逐字稿要上傳到的 Drive 資料夾 ID
+  APPS_SCRIPT_URL              Apps Script Web App 的網址
 """
 
 import os
@@ -66,7 +74,7 @@ def run_transcription(audio_path):
     segments, info = model.transcribe(
         audio_path,
         language="zh",
-        initial_prompt="以下是繁體中文語音辨識字幕逐字稿，包含精確的標點符號與台灣習慣用語：",
+        initial_prompt="繁體中文會議紀錄與語音字幕逐字稿，包含精確標點符號與台灣習慣用語：",
         beam_size=5,
         best_of=5,
         vad_filter=False,
@@ -77,14 +85,35 @@ def run_transcription(audio_path):
     cc = OpenCC("s2twp")
 
     lines = []
+    # 過濾 Whisper 前奏/尾奏可能發生的幻覺字詞 (例如 MV 詞曲介紹、字幕組水印)
+    hallucination_keywords = [
+        "Amara", "amara", "字幕組", "社群提供", "Bilibili", "bilibili",
+        "訂閱", "按讚", "頻道", "詞曲", "作詞", "作曲", "編曲", "演唱", "提供字幕"
+    ]
+
     for seg in segments:
         ts = format_timestamp(seg.start)
         raw_text = seg.text.strip()
         text_tc = cc.convert(raw_text)
+
+        # 檢查是否包含幻覺關鍵字
+        if any(keyword in text_tc for keyword in hallucination_keywords):
+            continue
+
         lines.append(f"{ts} {text_tc}")
         print(f"{ts} {text_tc}")  # 順便印在 Actions log 方便除錯
 
     return "\n".join(lines)
+
+
+def upload_transcript(drive, text, base_name):
+    file_metadata = {
+        "name": f"{base_name}_逐字稿.txt",
+        "parents": [TRANSCRIPT_FOLDER_ID]
+    }
+    media = MediaIoBaseUpload(io.BytesIO(text.encode("utf-8")), mimetype="text/plain")
+    file = drive.files().create(body=file_metadata, media_body=media, fields="id").execute()
+    return file["id"]
 
 
 def delete_audio(drive, file_id):
