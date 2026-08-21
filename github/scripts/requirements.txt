@@ -2,3 +2,4 @@ faster-whisper==1.0.3
 google-api-python-client==2.126.0
 google-auth==2.29.0
 requests==2.32.3
+opencc-python-reimplemented==0.1.7
