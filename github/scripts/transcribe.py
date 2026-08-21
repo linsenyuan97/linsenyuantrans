@@ -39,6 +39,8 @@ APPS_SCRIPT_URL = os.environ["APPS_SCRIPT_URL"]
 
 def get_drive_service():
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    if isinstance(info, dict) and "private_key" in info:
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
     creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     return build("drive", "v3", credentials=creds)
 
