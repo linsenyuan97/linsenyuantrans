@@ -4,17 +4,9 @@
 流程：
   1. 用 Service Account 從 Google Drive 下載音訊檔
   2. 用 faster-whisper 做語音辨識（中文）
-  3. 把逐字稿（含時間戳記）存成 txt，上傳回 Google Drive
+  3. 使用 OpenCC 自動轉為臺灣正體中文
   4. 刪除原始音訊檔（隱私考量）
-  5. 呼叫 Apps Script Web App 回報完成狀態
-
-需要的環境變數（由 GitHub Actions workflow 傳入）：
-  TASK_ID                      任務 ID
-  DRIVE_FILE_ID                音訊檔在 Drive 上的檔案 ID
-  FILE_NAME                    原始檔名（可選，用於逐字稿命名）
-  GOOGLE_SERVICE_ACCOUNT_JSON  Service Account 金鑰 JSON 內容（整段字串）
-  TRANSCRIPT_FOLDER_ID         逐字稿要上傳到的 Drive 資料夾 ID
-  APPS_SCRIPT_URL              Apps Script Web App 的網址
+  5. 呼叫 Apps Script Web App 回報完成狀態與字幕內容
 """
 
 import os
@@ -63,30 +55,32 @@ def format_timestamp(seconds):
 
 def run_transcription(audio_path):
     from faster_whisper import WhisperModel
+    from opencc import OpenCC
 
     print("載入模型中…")
     model = WhisperModel("medium", device="cpu", compute_type="int8")
 
     print("開始辨識…")
-    segments, info = model.transcribe(audio_path, language="zh", vad_filter=True)
+    # 提示模型優先輸出繁體中文
+    segments, info = model.transcribe(
+        audio_path,
+        language="zh",
+        initial_prompt="以下是繁體中文的會議紀錄字幕逐字稿：",
+        vad_filter=True
+    )
+
+    # 使用 OpenCC 將簡體中文無縫轉為臺灣正體中文 (含常用詞彙轉換)
+    cc = OpenCC("s2twp")
 
     lines = []
     for seg in segments:
         ts = format_timestamp(seg.start)
-        lines.append(f"{ts} {seg.text.strip()}")
-        print(f"{ts} {seg.text.strip()}")  # 順便印在 Actions log 方便除錯
+        raw_text = seg.text.strip()
+        text_tc = cc.convert(raw_text)
+        lines.append(f"{ts} {text_tc}")
+        print(f"{ts} {text_tc}")  # 順便印在 Actions log 方便除錯
 
     return "\n".join(lines)
-
-
-def upload_transcript(drive, text, base_name):
-    file_metadata = {
-        "name": f"{base_name}_逐字稿.txt",
-        "parents": [TRANSCRIPT_FOLDER_ID]
-    }
-    media = MediaIoBaseUpload(io.BytesIO(text.encode("utf-8")), mimetype="text/plain")
-    file = drive.files().create(body=file_metadata, media_body=media, fields="id").execute()
-    return file["id"]
 
 
 def delete_audio(drive, file_id):
