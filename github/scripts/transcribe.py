@@ -97,11 +97,11 @@ def delete_audio(drive, file_id):
         print(f"刪除音訊檔失敗（可忽略，不影響逐字稿結果）: {e}")
 
 
-def notify_callback(status, transcript_file_id=None):
+def notify_callback(status, transcript_text=None):
     payload = {"taskId": TASK_ID, "status": status}
-    if transcript_file_id:
-        payload["transcriptFileId"] = transcript_file_id
-    resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=30)
+    if transcript_text:
+        payload["transcriptText"] = transcript_text
+    resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=120)
     print("回報狀態:", resp.status_code, resp.text[:200])
 
 
@@ -115,12 +115,11 @@ def main():
 
         transcript_text = run_transcription(audio_path)
 
-        print("上傳逐字稿…")
-        transcript_file_id = upload_transcript(drive, transcript_text, FILE_NAME)
-
+        print("刪除原始音訊檔…")
         delete_audio(drive, DRIVE_FILE_ID)
 
-        notify_callback("done", transcript_file_id)
+        print("回報逐字稿結果給 Apps Script…")
+        notify_callback("done", transcript_text=transcript_text)
         print("完成！")
 
     except Exception as e:
