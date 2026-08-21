@@ -1,9 +1,9 @@
 """
-林森苑會議辨識字幕 — GitHub Actions 辨識腳本
+林森苑會議辨識字幕 — GitHub Actions 辨識腳本 (Large-v3 高精準度版)
 
 流程：
   1. 用 Service Account 從 Google Drive 下載音訊檔
-  2. 用 faster-whisper 做語音辨識（中文）
+  2. 用 OpenAI large-v3 模型做高精準度語音辨識（繁體中文）
   3. 使用 OpenCC 自動轉為臺灣正體中文
   4. 刪除原始音訊檔（隱私考量）
   5. 呼叫 Apps Script Web App 回報完成狀態與字幕內容
@@ -57,16 +57,20 @@ def run_transcription(audio_path):
     from faster_whisper import WhisperModel
     from opencc import OpenCC
 
-    print("載入模型中…")
-    model = WhisperModel("medium", device="cpu", compute_type="int8")
+    print("載入頂級 Whisper 模型 (large-v3) 中…")
+    # 使用 OpenAI 最高精準度的 large-v3 模型
+    model = WhisperModel("large-v3", device="cpu", compute_type="int8")
 
-    print("開始辨識…")
-    # 提示模型優先輸出繁體中文
+    print("開始高精準度辨識…")
+    # 提示模型優先輸出繁體中文，啟用集束搜尋 (beam_size=5) 提高正確率
     segments, info = model.transcribe(
         audio_path,
         language="zh",
-        initial_prompt="以下是繁體中文的會議紀錄字幕逐字稿：",
-        vad_filter=True
+        initial_prompt="以下是繁體中文語音辨識字幕逐字稿，包含精確的標點符號與台灣習慣用語：",
+        beam_size=5,
+        best_of=5,
+        vad_filter=False,
+        condition_on_previous_text=False
     )
 
     # 使用 OpenCC 將簡體中文無縫轉為臺灣正體中文 (含常用詞彙轉換)
