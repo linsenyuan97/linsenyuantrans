@@ -1,12 +1,12 @@
 """
-林森苑會議辨識字幕 — GitHub Actions 辨識腳本
+林森苑會議辨識字幕 — GitHub Actions 辨識腳本 (v2 — 準確度優化版)
 
-流程：
-  1. 用 Service Account 從 Google Drive 下載音訊檔
-  2. 用 faster-whisper 做語音辨識（中文）
-  3. 把逐字稿（含時間戳記）存成 txt，上傳回 Google Drive
-  4. 刪除原始音訊檔（隱私考量）
-  5. 呼叫 Apps Script Web App 回報完成狀態
+相較前一版的改動：
+  1. 重新啟用 VAD（語音活動偵測），並調參數 — 這是準確度/幻覺問題最大的關鍵
+  2. 加入音訊前處理（ffmpeg 正規化音量、轉 16kHz mono、去除低頻噪音）
+  3. initial_prompt 改為可自訂的社區專有名詞（請依實際狀況修改 MEETING_VOCABULARY）
+  4. 加入 hotwords 參數，針對專有名詞做解碼偏置（不影響整體語氣，只加強特定詞彙辨識率）
+  5. 加入 hallucination_silence_threshold，降低長靜音後亂講話的機率
 
 需要的環境變數（由 GitHub Actions workflow 傳入）：
   TASK_ID                      任務 ID
@@ -21,6 +21,7 @@ import os
 import io
 import json
 import sys
+import subprocess
 import requests
 from datetime import timedelta
 
@@ -35,6 +36,21 @@ DRIVE_FILE_ID = os.environ["DRIVE_FILE_ID"]
 FILE_NAME = os.environ.get("FILE_NAME") or "meeting_audio"
 TRANSCRIPT_FOLDER_ID = os.environ["TRANSCRIPT_FOLDER_ID"]
 APPS_SCRIPT_URL = os.environ["APPS_SCRIPT_URL"]
+
+# ---------------------------------------------------------------------------
+# 請依實際會議內容修改：常出現的人名、職稱、大樓/社區用語
+# 放在這裡可以提升 Whisper 對這些詞的辨識準確度（尤其是同音異字容易錯的專有名詞）
+# ---------------------------------------------------------------------------
+MEETING_VOCABULARY = [
+    "林森苑", "管理委員會", "主任委員", "總幹事", "財務委員",
+    "區分所有權人", "管理費", "公共基金", "臨時動議",
+    # ← 在這裡加入實際會用到的人名、廠商名稱等
+]
+
+HALLUCINATION_KEYWORDS = [
+    "Amara", "amara", "字幕組", "社群提供", "Bilibili", "bilibili",
+    "訂閱", "按讚", "頻道", "詞曲", "作詞", "作曲", "編曲", "演唱", "提供字幕"
+]
 
 
 def get_drive_service():
@@ -56,6 +72,27 @@ def download_audio(drive, file_id, dest_path):
                 print(f"下載進度: {int(status.progress() * 100)}%")
 
 
+def preprocess_audio(input_path, output_path):
+    """
+    音訊前處理：
+      - 轉成 16kHz 單聲道（Whisper 訓練時使用的規格）
+      - loudnorm 音量正規化（解決忽大忽小的問題）
+      - highpass 過濾掉 80Hz 以下的低頻噪音（空調、麥克風悶音）
+    """
+    print("音訊前處理中（正規化音量 / 去噪 / 轉換取樣率）…")
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-ar", "16000", "-ac", "1",
+        "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11",
+        output_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("音訊前處理失敗，改用原始檔案繼續：", result.stderr[-500:])
+        return input_path
+    return output_path
+
+
 def format_timestamp(seconds):
     td = timedelta(seconds=int(seconds))
     return str(td) if td >= timedelta(hours=1) else "0:" + str(td)
@@ -65,43 +102,46 @@ def run_transcription(audio_path):
     from faster_whisper import WhisperModel
     from opencc import OpenCC
 
-    print("載入頂級 Whisper 模型 (large-v3) 中…")
-    # 使用 OpenAI 最高精準度的 large-v3 模型
+    print("載入 Whisper 模型 (large-v3) 中…")
     model = WhisperModel("large-v3", device="cpu", compute_type="int8")
 
-    print("開始高精準度辨識…")
-    # 提示模型優先輸出繁體中文，啟用集束搜尋 (beam_size=5) 提高正確率
+    initial_prompt = (
+        "以下是社區管理委員會會議的繁體中文逐字稿，包含正確標點符號與台灣慣用語。"
+        "常見詞彙：" + "、".join(MEETING_VOCABULARY)
+    )
+
+    print("開始辨識…")
     segments, info = model.transcribe(
         audio_path,
         language="zh",
-        initial_prompt="繁體中文會議紀錄與語音字幕逐字稿，包含精確標點符號與台灣習慣用語：",
+        initial_prompt=initial_prompt,
+        hotwords="、".join(MEETING_VOCABULARY),  # 針對專有名詞做解碼偏置
         beam_size=5,
         best_of=5,
-        vad_filter=False,
-        condition_on_previous_text=False
+        condition_on_previous_text=False,  # 避免錯誤在片段間連鎖擴散
+        vad_filter=True,                    # ★ 關鍵修正：重新啟用語音活動偵測
+        vad_parameters=dict(
+            min_silence_duration_ms=500,    # 靜音超過 0.5 秒才切段，避免把正常停頓切碎
+            speech_pad_ms=200                # 語音前後各保留 200ms，避免斷字
+        ),
+        hallucination_silence_threshold=2.0  # 靜音超過 2 秒的區間，抑制幻覺文字
     )
 
-    # 使用 OpenCC 將簡體中文無縫轉為臺灣正體中文 (含常用詞彙轉換)
-    cc = OpenCC("s2twp")
+    cc = OpenCC("s2twp")  # 簡體 → 台灣正體（含慣用詞轉換）
 
     lines = []
-    # 過濾 Whisper 前奏/尾奏可能發生的幻覺字詞 (例如 MV 詞曲介紹、字幕組水印)
-    hallucination_keywords = [
-        "Amara", "amara", "字幕組", "社群提供", "Bilibili", "bilibili",
-        "訂閱", "按讚", "頻道", "詞曲", "作詞", "作曲", "編曲", "演唱", "提供字幕"
-    ]
-
     for seg in segments:
         ts = format_timestamp(seg.start)
         raw_text = seg.text.strip()
+        if not raw_text:
+            continue
         text_tc = cc.convert(raw_text)
 
-        # 檢查是否包含幻覺關鍵字
-        if any(keyword in text_tc for keyword in hallucination_keywords):
+        if any(keyword in text_tc for keyword in HALLUCINATION_KEYWORDS):
             continue
 
         lines.append(f"{ts} {text_tc}")
-        print(f"{ts} {text_tc}")  # 順便印在 Actions log 方便除錯
+        print(f"{ts} {text_tc}")
 
     return "\n".join(lines)
 
@@ -134,13 +174,16 @@ def notify_callback(status, transcript_text=None):
 
 def main():
     drive = get_drive_service()
-    audio_path = "/tmp/audio_input"
+    raw_path = "/tmp/audio_input"
+    processed_path = "/tmp/audio_processed.wav"
 
     try:
         print("下載音訊中…")
-        download_audio(drive, DRIVE_FILE_ID, audio_path)
+        download_audio(drive, DRIVE_FILE_ID, raw_path)
 
-        transcript_text = run_transcription(audio_path)
+        audio_for_transcribe = preprocess_audio(raw_path, processed_path)
+
+        transcript_text = run_transcription(audio_for_transcribe)
 
         print("刪除原始音訊檔…")
         delete_audio(drive, DRIVE_FILE_ID)
